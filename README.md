@@ -16,6 +16,7 @@ Drop raw footage in a folder, chat with Claude Code, get `final.mp4` back. Works
 |--------------|------|----------|--------------|-----------------------------------------------|
 | `whisper`    | Free | 1 (fixed)| ✅ Local     | Default. `mlx-whisper` or `faster-whisper`.   |
 | `vibevoice`  | GPU cost | N (real diarization) | ❌ CUDA-only | Set `VIBEVOICE_ASR_URL`, pass `--backend vibevoice`. |
+| `funasr`     | Self-hosted | N (CAM++ diarization) | ✅ (remote server) | Set `FUN_ASR_URL`, pass `--backend funasr`. |
 | `elevenlabs` | Paid | N (Scribe diarization) | ✅ (cloud) | Set `ELEVENLABS_API_KEY`, pass `--backend elevenlabs`. |
 
 Everything downstream (`pack_transcripts.py`, `render.py`, EDL generation, the SKILL) is untouched — each backend emits the same `{"words": [...]}` shape.
@@ -94,6 +95,19 @@ python helpers/transcribe_batch.py /path/to/videos --backend vibevoice
 ```
 
 The endpoint just needs to accept a multipart `file=<wav>` POST and return VibeVoice's segment JSON (or the normalized `{"words":[…]}` shape); see [`helpers/transcribe.py`](helpers/transcribe.py) for the exact contract.
+
+### Optional: multi-speaker diarization with a FunASR server
+
+If you run a FunASR server with its OpenAI-compatible API (Qwen3-ASR / SenseVoice backends, CAM++ diarization), point freecut at it:
+
+```bash
+cp .env.example .env
+echo "FUN_ASR_URL=http://192.168.50.79:5078" >> .env
+
+python helpers/transcribe_batch.py /path/to/videos --backend funasr
+```
+
+`FUN_ASR_URL` accepts the server base URL, a `/v1` base, or the full `/v1/audio/transcriptions` path — all are normalized. Word-level timestamps are requested via the forced aligner; the backend's speaker labels (`Speaker1`, …) are remapped to `speaker_0`, `speaker_1`, ….
 
 ### Optional: original ElevenLabs Scribe backend
 

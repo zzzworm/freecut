@@ -122,6 +122,18 @@ chmod 600 ~/Developer/freecut/.env
 
 Then batch-transcribe with `--backend vibevoice`.
 
+**Optional — FunASR server (multi-speaker diarization, self-hosted):**
+
+If the user runs a FunASR server with its OpenAI-compatible API, write its base URL to `.env`:
+
+```bash
+cp ~/Developer/freecut/.env.example ~/Developer/freecut/.env
+$EDITOR ~/Developer/freecut/.env       # FUN_ASR_URL=http://192.168.50.79:5078
+chmod 600 ~/Developer/freecut/.env
+```
+
+Then batch-transcribe with `--backend funasr`. The URL may be a bare host, a `/v1` base, or the full `/v1/audio/transcriptions` path.
+
 **Optional — ElevenLabs Scribe (paid, original video-use backend):**
 
 ```bash

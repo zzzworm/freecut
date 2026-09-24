@@ -59,7 +59,7 @@ The skill lives in `freecut/`. User footage lives wherever they put it. All sess
 
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
-- Transcription backend is available. The default is `whisper` (free, local) — verify `mlx-whisper` (Apple Silicon) or `faster-whisper` is importable. If neither is installed, tell the user to `pip install mlx-whisper` (or `faster-whisper`) rather than falling through to a paid backend silently. For the optional `vibevoice` / `elevenlabs` backends, check `VIBEVOICE_ASR_URL` / `ELEVENLABS_API_KEY` in the environment or `.env` at the freecut repo root.
+- Transcription backend is available. The default is `whisper` (free, local) — verify `mlx-whisper` (Apple Silicon) or `faster-whisper` is importable. If neither is installed, tell the user to `pip install mlx-whisper` (or `faster-whisper`) rather than falling through to a paid backend silently. For the optional `vibevoice` / `funasr` / `elevenlabs` backends, check `VIBEVOICE_ASR_URL` / `FUN_ASR_URL` / `ELEVENLABS_API_KEY` in the environment or `.env` at the freecut repo root.
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
@@ -71,7 +71,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 
 ## Helpers
 
-- **`transcribe.py <video>`** — single-file transcription. Pluggable backend via `--backend {whisper,vibevoice,elevenlabs}` (default `whisper`, local + free, single speaker). `vibevoice` uses `VIBEVOICE_ASR_URL` for real diarization; `elevenlabs` uses `ELEVENLABS_API_KEY` and supports `--num-speakers`. Cached.
+- **`transcribe.py <video>`** — single-file transcription. Pluggable backend via `--backend {whisper,vibevoice,funasr,elevenlabs}` (default `whisper`, local + free, single speaker). `vibevoice` uses `VIBEVOICE_ASR_URL`; `funasr` uses `FUN_ASR_URL` (OpenAI-compatible FunASR server, CAM++ diarization); `elevenlabs` uses `ELEVENLABS_API_KEY` and supports `--num-speakers`. Cached.
 - **`transcribe_batch.py <videos_dir>`** — 4-worker parallel transcription. Same `--backend` flag. Use for multi-take.
 - **`pack_transcripts.py --edit-dir <dir>`** — `transcripts/*.json` → `takes_packed.md` (phrase-level, break on silence ≥ 0.5s or speaker change). Works identically across backends because the JSON shape is normalized.
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.

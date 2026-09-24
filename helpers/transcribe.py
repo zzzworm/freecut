@@ -21,6 +21,10 @@ Backends:
                   diarization) — every word gets speaker_id "speaker_0".
     vibevoice   — Calls an HTTP endpoint (env VIBEVOICE_ASR_URL) that serves
                   the microsoft/VibeVoice-ASR model. Multi-speaker diarization.
+    funasr      — Calls a FunASR OpenAI-compatible endpoint (env FUN_ASR_URL,
+                  e.g. http://192.168.50.79:5078) via
+                  POST /v1/audio/transcriptions. Multi-speaker diarization
+                  (CAM++), word-level timestamps via the forced aligner.
     elevenlabs  — Original ElevenLabs Scribe path. Needs ELEVENLABS_API_KEY.
 
 Cached: if the output file already exists, transcription is skipped.
@@ -29,6 +33,7 @@ Usage:
     python helpers/transcribe.py <video_path>
     python helpers/transcribe.py <video_path> --backend whisper --model small
     python helpers/transcribe.py <video_path> --backend vibevoice
+    python helpers/transcribe.py <video_path> --backend funasr
     python helpers/transcribe.py <video_path> --backend elevenlabs --num-speakers 2
 """
 
@@ -215,6 +220,173 @@ def transcribe_whisper(
 
 
 # ---------------------------------------------------------------------------
+# Shared segment → words conversion for HTTP ASR backends
+# ---------------------------------------------------------------------------
+
+def _first(d: dict, *keys: str, default: float = 0.0) -> float:
+    """Return the first non-None value among `keys` as float, else `default`.
+
+    Lets us accept both 'start'/'end' and 'start_time'/'end_time' conventions
+    even when a key is present-but-null.
+    """
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return float(v)
+    return default
+
+
+class _SpeakerMap:
+    """Stable mapping from arbitrary speaker labels → speaker_0, speaker_1, ...
+
+    Backends use different label conventions ("SPEAKER_00", "Speaker1",
+    "说话人1"); downstream code only understands speaker_N.
+    """
+
+    def __init__(self) -> None:
+        self._ids: dict[str, str] = {}
+
+    def __call__(self, label: object) -> str:
+        key = str(label) if label is not None else "0"
+        if key not in self._ids:
+            self._ids[key] = f"speaker_{len(self._ids)}"
+        return self._ids[key]
+
+
+def _seg_speaker(seg: dict) -> str:
+    return (
+        seg.get("speaker")
+        or seg.get("speaker_id")
+        or seg.get("who")
+        or "0"
+    )
+
+
+def _segments_to_words(segments: list) -> list[dict]:
+    """Convert HTTP-backend segment JSON to the normalized words[] shape.
+
+    Accepts both key conventions seen in the wild:
+      - VibeVoice: start/end, words[{text,start,end}], speaker|speaker_id|who
+      - FunASR:    start_time/end_time, word_tokens[{text,start_time,end_time}],
+                   speaker_id ("Speaker1", ...)
+
+    Speaker labels are stably remapped to speaker_0, speaker_1, ...
+    If per-word timestamps are absent, we linearly interpolate across the
+    segment text so pack_transcripts still gets word-level entries.
+    """
+    sid = _SpeakerMap()
+
+    word_entries: list[dict] = []
+    for seg in segments:
+        speaker_id = sid(_seg_speaker(seg))
+        seg_start = _first(seg, "start", "start_time")
+        seg_end = _first(seg, "end", "end_time", default=seg_start)
+        seg_words = seg.get("words") or seg.get("word_tokens") or []
+
+        if seg_words:
+            for w in seg_words:
+                text = (w.get("text") or w.get("word") or "").strip()
+                if not text:
+                    continue
+                word_entries.append({
+                    "type": "word",
+                    "text": text,
+                    "start": _first(w, "start", "start_time", default=seg_start),
+                    "end": _first(w, "end", "end_time", default=seg_end),
+                    "speaker_id": speaker_id,
+                })
+        else:
+            # Fall back to linear interpolation across the segment text.
+            tokens = (seg.get("text") or "").split()
+            if not tokens:
+                continue
+            span = max(seg_end - seg_start, 1e-3)
+            per = span / len(tokens)
+            for i, tok in enumerate(tokens):
+                word_entries.append({
+                    "type": "word",
+                    "text": tok,
+                    "start": seg_start + i * per,
+                    "end": seg_start + (i + 1) * per,
+                    "speaker_id": speaker_id,
+                })
+
+    word_entries.sort(key=lambda w: w["start"])
+    return word_entries
+
+
+def _openai_words_to_normalized(words: list, segments: list) -> dict:
+    """Convert an OpenAI-style top-level word list to the normalized shape.
+
+    FunASR's verbose_json puts word timestamps in a top-level
+    "words": [{"word": "Hello", "start": 0.0, "end": 0.48}, ...] array while
+    "segments" only carry speaker labels and time spans. Words get their
+    speaker attributed from the segment whose time range contains them
+    (nearest segment if a word falls in a gap).
+    """
+    sid = _SpeakerMap()
+
+    def speaker_at(t: float) -> str:
+        best_label: object = None
+        best_dist: float | None = None
+        for seg in segments:
+            s = _first(seg, "start", "start_time")
+            e = _first(seg, "end", "end_time", default=s)
+            if s <= t <= e:
+                return sid(_seg_speaker(seg))
+            d = min(abs(t - s), abs(t - e))
+            if best_dist is None or d < best_dist:
+                best_dist, best_label = d, _seg_speaker(seg)
+        return sid(best_label)
+
+    word_entries: list[dict] = []
+    for w in words:
+        if not isinstance(w, dict):
+            continue
+        text = (w.get("word") or w.get("text") or "").strip()
+        if not text:
+            continue
+        start = _first(w, "start", "start_time")
+        end = _first(w, "end", "end_time", default=start)
+        word_entries.append({
+            "type": "word",
+            "text": text,
+            "start": start,
+            "end": end,
+            "speaker_id": speaker_at((start + end) / 2),
+        })
+
+    word_entries.sort(key=lambda w: w["start"])
+    return {"words": _interleave_spacing(word_entries)}
+
+
+def _payload_to_normalized(payload: object) -> dict:
+    """Normalize an HTTP-backend response to {"words": [...]}.
+
+    Handles three shapes, in order:
+      1. Already normalized {"words": [{type,text,start,end,speaker_id}]}.
+      2. Top-level word-timestamp list + speaker-bearing segments
+         (FunASR verbose_json with word_timestamps=true).
+      3. Segments with or without per-word entries (VibeVoice / FunASR docs).
+    """
+    if not isinstance(payload, dict):
+        return {"words": []}
+
+    words = payload.get("words")
+    segments = payload.get("segments") or payload.get("results") or []
+
+    if isinstance(words, list) and words and isinstance(words[0], dict):
+        first = words[0]
+        if all(k in first for k in ("type", "text", "start", "end", "speaker_id")):
+            return payload  # already normalized
+        # OpenAI-style word list: {"word"|"text", "start", "end"} entries.
+        if any(k in first for k in ("word", "text")) and "start" in first and "end" in first:
+            return _openai_words_to_normalized(words, segments)
+
+    return {"words": _interleave_spacing(_segments_to_words(segments))}
+
+
+# ---------------------------------------------------------------------------
 # Backend: vibevoice (HTTP endpoint, multi-speaker diarization)
 # ---------------------------------------------------------------------------
 
@@ -231,9 +403,6 @@ def transcribe_vibevoice(
                        "start": 0.12, "end": 3.4,
                        "text": "hello world",
                        "words": [{"text":"hello","start":0.12,"end":0.42}, ...]}]}
-
-    If per-word timestamps are absent, we linearly interpolate across the
-    segment text so pack_transcripts still gets word-level entries.
     """
     endpoint = url or _env("VIBEVOICE_ASR_URL")
     if not endpoint:
@@ -256,66 +425,66 @@ def transcribe_vibevoice(
         )
     if resp.status_code != 200:
         raise RuntimeError(f"vibevoice endpoint returned {resp.status_code}: {resp.text[:500]}")
-    payload = resp.json()
+    return _payload_to_normalized(resp.json())
 
-    # Already normalized?
-    if isinstance(payload, dict) and isinstance(payload.get("words"), list) and payload["words"]:
-        first = payload["words"][0]
-        if all(k in first for k in ("type", "text", "start", "end", "speaker_id")):
-            return payload
 
-    # Convert VibeVoice segments → words[] with speaker_N IDs.
-    segments = []
-    if isinstance(payload, dict):
-        segments = payload.get("segments") or payload.get("results") or []
+# ---------------------------------------------------------------------------
+# Backend: funasr (OpenAI-compatible HTTP endpoint, multi-speaker diarization)
+# ---------------------------------------------------------------------------
 
-    # Stable mapping from arbitrary speaker labels → speaker_0, speaker_1, ...
-    speaker_ids: dict[str, str] = {}
+def _funasr_endpoint(base_url: str) -> str:
+    """Build the /v1/audio/transcriptions URL from a base URL.
 
-    def sid(label: object) -> str:
-        key = str(label) if label is not None else "0"
-        if key not in speaker_ids:
-            speaker_ids[key] = f"speaker_{len(speaker_ids)}"
-        return speaker_ids[key]
+    Accepts a bare host (http://host:port), a /v1 base, or the full
+    transcriptions path — all normalize to the same endpoint.
+    """
+    url = base_url.rstrip("/")
+    if url.endswith("/v1/audio/transcriptions"):
+        return url
+    if url.endswith("/v1"):
+        return f"{url}/audio/transcriptions"
+    return f"{url}/v1/audio/transcriptions"
 
-    word_entries: list[dict] = []
-    for seg in segments:
-        spk_label = seg.get("speaker") or seg.get("speaker_id") or seg.get("who") or "0"
-        speaker_id = sid(spk_label)
-        seg_start = float(seg.get("start", 0.0))
-        seg_end = float(seg.get("end", seg_start))
-        seg_words = seg.get("words") or []
 
-        if seg_words:
-            for w in seg_words:
-                text = (w.get("text") or w.get("word") or "").strip()
-                if not text:
-                    continue
-                word_entries.append({
-                    "type": "word",
-                    "text": text,
-                    "start": float(w.get("start", seg_start)),
-                    "end": float(w.get("end", seg_end)),
-                    "speaker_id": speaker_id,
-                })
-        else:
-            # Fall back to linear interpolation across the segment text.
-            tokens = (seg.get("text") or "").split()
-            if not tokens:
-                continue
-            span = max(seg_end - seg_start, 1e-3)
-            per = span / len(tokens)
-            for i, tok in enumerate(tokens):
-                word_entries.append({
-                    "type": "word",
-                    "text": tok,
-                    "start": seg_start + i * per,
-                    "end": seg_start + (i + 1) * per,
-                    "speaker_id": speaker_id,
-                })
+def transcribe_funasr(
+    audio_path: Path,
+    url: str | None = None,
+    language: str | None = None,
+    word_timestamps: bool = True,
+) -> dict:
+    """Call a FunASR OpenAI-compatible endpoint (POST /v1/audio/transcriptions).
 
-    word_entries.sort(key=lambda w: w["start"])
-    return {"words": _interleave_spacing(word_entries)}
+    Speaker diarization (CAM++) is on by default. Word-level timestamps are
+    requested via the forced aligner; if the backend returns none, the shared
+    segment converter interpolates across the segment text.
+    """
+    base = url or _env("FUN_ASR_URL")
+    if not base:
+        sys.exit(
+            "funasr backend requires FUN_ASR_URL (env or .env).\n"
+            "Point it at your FunASR server base URL, e.g. "
+            "FUN_ASR_URL=http://192.168.50.79:5078"
+        )
+    endpoint = _funasr_endpoint(base)
+
+    data: dict[str, str] = {
+        "response_format": "verbose_json",
+        "enable_speaker_diarization": "true",
+        "word_timestamps": "true" if word_timestamps else "false",
+    }
+    if language:
+        data["language"] = language
+
+    with open(audio_path, "rb") as f:
+        resp = requests.post(
+            endpoint,
+            files={"file": (audio_path.name, f, "audio/wav")},
+            data=data,
+            timeout=1800,
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"funasr endpoint returned {resp.status_code}: {resp.text[:500]}")
+    return _payload_to_normalized(resp.json())
 
 
 # ---------------------------------------------------------------------------
@@ -363,12 +532,15 @@ def _run_backend(
     num_speakers: int | None,
     whisper_model: str,
     vibevoice_url: str | None,
+    funasr_url: str | None,
     api_key: str | None,
 ) -> dict:
     if backend == "whisper":
         return transcribe_whisper(audio, model=whisper_model, language=language)
     if backend == "vibevoice":
         return transcribe_vibevoice(audio, url=vibevoice_url, language=language)
+    if backend == "funasr":
+        return transcribe_funasr(audio, url=funasr_url, language=language)
     if backend == "elevenlabs":
         key = api_key or load_api_key()
         return call_scribe(audio, key, language=language, num_speakers=num_speakers)
@@ -385,6 +557,7 @@ def transcribe_one(
     backend: str = DEFAULT_BACKEND,
     whisper_model: str = DEFAULT_WHISPER_MODEL,
     vibevoice_url: str | None = None,
+    funasr_url: str | None = None,
 ) -> Path:
     """Transcribe a single video. Returns path to transcript JSON.
 
@@ -419,6 +592,7 @@ def transcribe_one(
             num_speakers=num_speakers,
             whisper_model=whisper_model,
             vibevoice_url=vibevoice_url,
+            funasr_url=funasr_url,
             api_key=api_key,
         )
 
@@ -445,7 +619,7 @@ def main() -> None:
     )
     ap.add_argument(
         "--backend",
-        choices=["whisper", "vibevoice", "elevenlabs"],
+        choices=["whisper", "vibevoice", "funasr", "elevenlabs"],
         default=DEFAULT_BACKEND,
         help=f"Transcription backend (default: {DEFAULT_BACKEND}).",
     )
@@ -459,6 +633,11 @@ def main() -> None:
         "--vibevoice-url",
         default=None,
         help="Override VIBEVOICE_ASR_URL. vibevoice backend only.",
+    )
+    ap.add_argument(
+        "--funasr-url",
+        default=None,
+        help="Override FUN_ASR_URL (base URL of the FunASR server). funasr backend only.",
     )
     ap.add_argument(
         "--language",
@@ -489,6 +668,7 @@ def main() -> None:
         backend=args.backend,
         whisper_model=args.model,
         vibevoice_url=args.vibevoice_url,
+        funasr_url=args.funasr_url,
     )
 
 

@@ -9,6 +9,7 @@ Usage:
     python helpers/transcribe_batch.py <videos_dir>
     python helpers/transcribe_batch.py <videos_dir> --backend whisper --model small
     python helpers/transcribe_batch.py <videos_dir> --backend vibevoice
+    python helpers/transcribe_batch.py <videos_dir> --backend funasr
     python helpers/transcribe_batch.py <videos_dir> --backend elevenlabs --num-speakers 2
     python helpers/transcribe_batch.py <videos_dir> --workers 4
     python helpers/transcribe_batch.py <videos_dir> --edit-dir /custom/edit
@@ -48,7 +49,7 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=4, help="Parallel workers (default: 4)")
     ap.add_argument(
         "--backend",
-        choices=["whisper", "vibevoice", "elevenlabs"],
+        choices=["whisper", "vibevoice", "funasr", "elevenlabs"],
         default=DEFAULT_BACKEND,
         help=f"Transcription backend (default: {DEFAULT_BACKEND}).",
     )
@@ -62,6 +63,11 @@ def main() -> None:
         "--vibevoice-url",
         default=None,
         help="Override VIBEVOICE_ASR_URL. vibevoice backend only.",
+    )
+    ap.add_argument(
+        "--funasr-url",
+        default=None,
+        help="Override FUN_ASR_URL (base URL of the FunASR server). funasr backend only.",
     )
     ap.add_argument(
         "--language",
@@ -115,6 +121,7 @@ def main() -> None:
                 backend=args.backend,
                 whisper_model=args.model,
                 vibevoice_url=args.vibevoice_url,
+                funasr_url=args.funasr_url,
             ): v
             for v in pending
         }
