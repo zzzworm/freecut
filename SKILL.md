@@ -60,6 +60,7 @@ The skill lives in `freecut/`. User footage lives wherever they put it. All sess
 First-time install lives in `install.md` (clone, deps, ffmpeg, skill registration, API key). Don't re-run it every session; on cold start just verify:
 
 - Transcription backend is available. The default is `whisper` (free, local) — verify `mlx-whisper` (Apple Silicon) or `faster-whisper` is importable. If neither is installed, tell the user to `pip install mlx-whisper` (or `faster-whisper`) rather than falling through to a paid backend silently. For the optional `vibevoice` / `funasr` / `elevenlabs` backends, check `VIBEVOICE_ASR_URL` / `FUN_ASR_URL` / `ELEVENLABS_API_KEY` in the environment or `.env` at the freecut repo root.
+- Optional OmniVoice is available only when narration is requested. Resolve `omnivoice-infer` from `OMNIVOICE_BIN`, `$OMNIVOICE_HOME/.venv/bin/omnivoice-infer`, or `PATH`; if none resolves, tell the user to install OmniVoice in its own venv rather than adding it to freecut's dependencies. The model may download on first use.
 - `ffmpeg` + `ffprobe` on PATH.
 - Python deps installed (`uv sync` or `pip install -e .` inside the repo).
 - Node.js + npm available if the session needs HyperFrames or Remotion slots. HyperFrames currently requires Node.js 22+.
@@ -77,6 +78,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`voiceover.py --text "…" -o out.wav`** — optional OmniVoice TTS narration. Plain `--text` uses an automatic voice; `--instruct` designs a voice; `--ref-audio` with optional `--ref-text` clones a voice. `--onto <video>` muxes the result, replacing audio by default; add `--mix --duck <0..1>` to keep the original audio underneath. Resolve the engine with `OMNIVOICE_HOME`, `OMNIVOICE_BIN`, or `PATH`.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -260,6 +262,20 @@ This is one style. If the brand is warm and serif, use that. If it's colorful an
 10. **"Do not ask questions. If anything is ambiguous, pick the most obvious interpretation and proceed."**
 
 One sub-agent = one file (unique filenames, parallel agents don't overwrite each other).
+
+## Voiceover / narration (OmniVoice TTS — optional)
+
+Use the optional [OmniVoice](https://github.com/k2-fsa/OmniVoice) stage for narration that is missing from silent process footage, timelapses, montages, or explainers. It is independent of ASR and of the EDL/render implementation. For no-speech footage, do not force a transcript; write or confirm the narration script and add it after the visual edit.
+
+- **Confirm the voice first.** Ask for or propose the voice direction, language, pacing, and whether the user wants auto voice, voice design, or cloning. Wait for confirmation before generating audio.
+- **Auto voice.** Pass `--text` or `--text-file` with no voice-specific option and let OmniVoice choose a voice.
+- **Voice design.** Pass `--instruct "warm female narrator, calm delivery"`; no reference clip is needed.
+- **Voice cloning.** Pass `--ref-audio <file>` and, when available, `--ref-text "<transcript>"`. Use only reference audio the user is authorized to use; never source or clone a voice without permission.
+- **Fit to picture.** Use `--duration <seconds>` to target a fixed narration length, or `--speed <factor>` to nudge the speaking rate. Do not pass both through the freecut wrapper. For tight sync, write the script to the shots and generate separate lines when needed. Use `--language` when autodetection is ambiguous and `--device` when the default device is unsuitable.
+- **Render, then mux.** Complete `render.py` first, then call `voiceover.py --onto <video> -o <output>`. The default replaces the video's audio. Add `--mix --duck <0..1>` to keep the original audio underneath, and `--offset <seconds>` to delay the VO. This stage does not change `edl.json` or re-render the picture.
+- **Duration and files.** OmniVoice writes a 24 kHz WAV. Muxing resamples it to 48 kHz stereo, copies the video stream, and keeps the rendered video's duration. Keep the generated WAV as a sidecar for review or reuse; muxing also creates a sibling `*.vo.wav`.
+- **Parallel work.** For independent narration lines, generate one WAV per line in parallel sub-agents, using unique output paths. Because each process loads the model, batch a script into one call when that is faster.
+- **Dry runs.** Use `--dry-run` to inspect the resolved OmniVoice command without running inference.
 
 ## Output spec
 

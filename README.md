@@ -28,6 +28,7 @@ Everything downstream (`pack_transcripts.py`, `render.py`, EDL generation, the S
 - **30ms audio fades** at every cut so you never hear a pop
 - **Burns subtitles** in your style — 2-word UPPERCASE chunks by default, fully customizable
 - **Generates animation overlays** via [HyperFrames](https://github.com/heygen-com/hyperframes), [Remotion](https://www.remotion.dev/), [Manim](https://www.manim.community/), or PIL — spawned in parallel sub-agents, one per animation
+- **Generates AI voiceover/narration** via [OmniVoice](https://github.com/k2-fsa/OmniVoice) TTS (optional) — auto voice, voice design, or voice cloning, then muxed onto rendered clips for silent process videos and montages
 - **Self-evaluates the rendered output** at every cut boundary before showing you anything
 - **Persists session memory** in `project.md` so next week's session picks up where you left off
 
@@ -117,6 +118,63 @@ If you already have an ElevenLabs key and want Scribe's specific output:
 echo "ELEVENLABS_API_KEY=sk-..." >> .env
 python helpers/transcribe_batch.py /path/to/videos --backend elevenlabs
 ```
+
+### Optional: OmniVoice narration
+
+[OmniVoice](https://github.com/k2-fsa/OmniVoice) is an optional TTS engine for adding narration to silent process footage, timelapses, montages, or explainers. It is not a freecut dependency: install it only when needed, in its own virtual environment, following the upstream installation instructions. Locate `omnivoice-infer` with `OMNIVOICE_HOME`, `OMNIVOICE_BIN`, or `PATH`:
+
+- `OMNIVOICE_HOME` points to the OmniVoice checkout whose `.venv/` contains `omnivoice-infer`.
+- `OMNIVOICE_BIN` points directly to the `omnivoice-infer` console script.
+- If neither variable is set, put `omnivoice-infer` on `PATH`.
+
+Render the picture first with `render.py`, then run `helpers/voiceover.py`. The narration helper is deliberately post-render; it does not change the EDL or the render pipeline.
+
+```bash
+# Generate a sidecar WAV only; keep it for review or later muxing.
+python helpers/voiceover.py \
+  --text "Watch this process come together." \
+  --edit-dir /path/to/videos/edit \
+  -o narration.wav
+
+# Voice design: no reference clip is required.
+python helpers/voiceover.py \
+  --text-file script.txt \
+  --instruct "warm female narrator, calm delivery" \
+  --language en \
+  -o narration-designed.wav
+
+# Voice cloning: use only reference audio you are authorized to use.
+python helpers/voiceover.py \
+  --text "Welcome to the finished piece." \
+  --ref-audio /path/to/authorized-reference.wav \
+  --ref-text "Transcript of the authorized reference clip." \
+  -o narration-cloned.wav
+
+# Mux onto a rendered video; default behavior replaces the video's audio.
+python helpers/voiceover.py \
+  --text-file script.txt \
+  --onto /path/to/videos/edit/final.mp4 \
+  -o /path/to/videos/edit/final-vo.mp4
+
+# Keep the original audio underneath, ducked to 15%, and delay the VO by 2s.
+python helpers/voiceover.py \
+  --text-file script.txt \
+  --onto /path/to/videos/edit/final.mp4 \
+  -o /path/to/videos/edit/final-vo-mix.mp4 \
+  --mix --duck 0.15 --offset 2
+
+# Inspect the resolved OmniVoice command without running inference.
+python helpers/voiceover.py \
+  --text "Check the command first." \
+  -o narration.wav \
+  --dry-run
+```
+
+OmniVoice supports automatic voice selection (plain `--text`), voice design (`--instruct`), and voice cloning (`--ref-audio`, with optional `--ref-text`). Choose either `--duration` to fit a fixed narration length or `--speed` to nudge speaking rate; do not pass both through the freecut wrapper. Use `--language` when autodetection is ambiguous and `--device` when the default device is not appropriate.
+
+The model writes a 24 kHz WAV. When muxing with `--onto`, freecut keeps the video stream and converts the narration to 48 kHz stereo. The output video keeps the rendered video's duration; narration that ends earlier does not shorten the picture. Muxing also creates a sibling `*.vo.wav` sidecar, which can be retained for review or reused independently.
+
+No-speech and near-silent footage is compatible: narration is generated after the visual edit, so the source does not need a transcript. Confirm the voice direction before generating, and use only reference audio and scripts you have permission to use.
 
 ## How it works
 
